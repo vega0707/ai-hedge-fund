@@ -37,7 +37,7 @@ from rich.console import Console
 
 from hedge_fund.backtesting import backtest_fund
 from hedge_fund.brokers import SimBroker
-from hedge_fund.data import CachedDataClient, FDClient
+from hedge_fund.data import CachedDataClient, make_data_client
 from hedge_fund.fund import Fund, load_spec, normalize_universe
 from hedge_fund.paths import ensure_mandates_dir
 from hedge_fund.pipeline import run_cycle
