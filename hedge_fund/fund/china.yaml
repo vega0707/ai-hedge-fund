@@ -1,0 +1,39 @@
+# 中国市场 mandate（A 股 + 港股）。用法：
+#
+#   .venv/bin/python -m hedge_fund.run hedge_fund/fund/china.yaml --tickers 300679,0700.HK
+#   .venv/bin/python -m hedge_fund.run hedge_fund/fund/china.yaml --tickers 300679 --backtest --start 2025-01-01
+#
+# A 股写法：300679 / 300679.SZ / sz300679；港股写法：0700.HK / hk00700。
+# 港股免费数据目前只有行情（价格），财务数据源暂缺——LLM 大师会因数据不足
+# 而弃权（abstain），量化模型（greenblatt/pead）返回中性；回测交易仍可用。
+#
+name: china-market
+strategies:
+  - name: deep-value          # 深度价值：格雷厄姆领衔，偏多头
+    weight: 0.5               # 资金切片，相对同策略组
+    models:
+      - name: graham
+        weight: 2.0
+      - name: buffett
+      - name: munger
+      - name: burry
+      - name: templeton
+      - name: neff
+      - name: greenblatt        # 魔法公式——纯量化，无 LLM 成本
+  - name: quality-masters     # 质量与风险优先
+    weight: 0.3
+    models:
+      - name: ackman
+      - name: marks
+      - name: dalio
+      - name: lynch
+  - name: earnings-drift      # 盈余漂移（量化）
+    weight: 0.2
+    models:
+      - name: pead
+risk:
+  max_position_pct: 0.25      # 单标的仓位上限 25%
+  max_gross_exposure: 1.0     # 无杠杆
+capital: 100000
+rebalance: weekly             # 每周调仓
+benchmark: "000300"             # 沪深300 指数（A 股基准，回测交易日网格）

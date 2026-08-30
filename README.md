@@ -54,6 +54,14 @@ export AIHF_DATA_PROVIDER=akshare
 aihf ~/.hedge-fund/mandates/example.yaml --tickers 600519,000001
 ```
 
+For a China-market mandate (A-shares + HK, CSI 300 benchmark, all 12 master
+models) use `hedge_fund/fund/china.yaml`:
+
+```bash
+export AIHF_DATA_PROVIDER=akshare
+aihf hedge_fund/fund/china.yaml --tickers 300679,0700.HK
+```
+
 `--tickers` accepts A-share spellings: `600519`, `sh600519`, `600519.SH`,
 `600519.SS`. Only the LLM key is still required for the persona agents
 (buffett, graham, …); quant models (`pead`, `greenblatt`) run keyless.

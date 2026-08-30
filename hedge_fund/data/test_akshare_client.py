@@ -19,8 +19,10 @@ import pytest
 from hedge_fund.data.akshare_client import (
     AkshareDataClient,
     _filing_deadline,
+    _hk_code,
     _map_company_facts,
     _map_financial_metrics,
+    _map_hk_tencent_prices,
     _map_price,
     _merge_abstract,
     _prefixed_symbol,
@@ -81,6 +83,94 @@ def test_normalize_ticker_rejects_non_a_share() -> None:
         normalize_ticker("AAPL")
     with pytest.raises(ValueError, match="A-share"):
         normalize_ticker("0700.HK")
+
+
+# ---------------------------------------------------------------------------
+# HK-ticker parsing
+# ---------------------------------------------------------------------------
+
+def test_hk_code_parses_suffix() -> None:
+    assert _hk_code("0700.HK") == "00700"
+    assert _hk_code("700.HK") == "00700"
+    assert _hk_code("9988.HK") == "09988"
+
+
+def test_hk_code_parses_prefix_and_plain() -> None:
+    assert _hk_code("hk00700") == "00700"
+    assert _hk_code("00700") == "00700"
+    assert _hk_code("9988") == "09988"
+
+
+def test_hk_code_returns_none_for_non_hk() -> None:
+    assert _hk_code("600519") is None
+    assert _hk_code("AAPL") is None
+    assert _hk_code("sh600519") is None
+
+
+# ---------------------------------------------------------------------------
+# Empty-result fallthrough
+# ---------------------------------------------------------------------------
+
+def test_try_sources_skips_empty_results() -> None:
+    class _Empty:
+        def __len__(self):
+            return 0
+
+    calls = []
+
+    def empty():
+        calls.append("empty")
+        return _Empty()
+
+    def full():
+        calls.append("full")
+        return "data"
+
+    client = AkshareDataClient()
+    assert client._try_sources([empty, full]) == "data"
+    assert calls == ["empty", "full"]
+
+
+# ---------------------------------------------------------------------------
+# Tencent HK prices (direct JSON feed — akshare's HK wrappers are broken
+# on this network: EastMoney blocked, Sina feed format changed)
+# ---------------------------------------------------------------------------
+
+def test_map_hk_tencent_prices() -> None:
+    # Tencent returns qfqday as arrays, not dicts
+    payload = {
+        "code": 0,
+        "data": {
+            "hk00700": {
+                "qfqday": [
+                    ["2026-07-02", "345.000", "350.000", "352.000", "343.000", "12345678.000", {}, "0.36", "12345.6"],
+                    ["2026-07-03", "349.000", "348.500", "351.000", "346.000", "9876543.000", {}, "-0.40", "9876.5"],
+                ]
+            }
+        },
+    }
+    prices = _map_hk_tencent_prices(payload, "hk00700")
+    assert len(prices) == 2
+    assert prices[0].time == "2026-07-02"
+    assert prices[0].open == 345.0
+    assert prices[0].close == 350.0
+    assert prices[0].high == 352.0
+    assert prices[0].low == 343.0
+    assert prices[0].volume == 12345678
+    assert prices[1].close == 348.5
+
+
+def test_map_hk_tencent_prices_accepts_dict_rows() -> None:
+    # Defensive: earlier feeds returned dict rows
+    payload = {"data": {"hk00700": {"day": [{"date": "2026-07-02", "open": "1.0",
+             "close": "1.1", "high": "1.2", "low": "0.9", "volume": "100"}]}}}
+    prices = _map_hk_tencent_prices(payload, "hk00700")
+    assert len(prices) == 1 and prices[0].close == 1.1
+
+
+def test_map_hk_tencent_prices_empty_on_bad_payload() -> None:
+    assert _map_hk_tencent_prices({"data": {}}, "hk00700") == []
+    assert _map_hk_tencent_prices({}, "hk00700") == []
 
 
 # ---------------------------------------------------------------------------

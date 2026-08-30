@@ -28,6 +28,8 @@ import re
 import time
 from datetime import datetime
 
+import requests
+
 from hedge_fund.data.models import (
     CompanyFacts,
     CompanyNews,
@@ -100,6 +102,23 @@ def _to_float(value, default=None):
         return default if (f != f) else f  # NaN -> default
     except (TypeError, ValueError):
         return default
+
+
+def _hk_code(ticker: str) -> str | None:
+    """Parse a HK ticker to its 5-digit code, or None if not HK.
+
+    Accepts '0700.HK', '700.HK', 'hk00700', '00700', '9988'.
+    """
+    t = ticker.strip().lower()
+    if t.endswith(".hk"):
+        digits = t[:-3]
+    elif t.startswith("hk"):
+        digits = t[2:]
+    else:
+        digits = t
+    if re.fullmatch(r"\d{1,5}", digits):
+        return digits.zfill(5)
+    return None
 
 
 def _prefixed_symbol(ticker: str) -> str:
@@ -236,6 +255,45 @@ def _map_financial_metrics(ticker: str, row: dict) -> FinancialMetrics:
 # DataClient implementation
 # ---------------------------------------------------------------------------
 
+def _map_hk_tencent_prices(payload: dict, code: str) -> list[Price]:
+    """Parse Tencent's HK kline JSON into Price rows.
+
+    Tencent's open quote endpoint is a stable public JSON feed (unlike
+    akshare's HK wrappers: EastMoney is often blocked, Sina's feed format
+    has changed). Rows arrive as arrays — [date, open, close, high, low,
+    volume, ...] — with dict rows accepted defensively.
+    """
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return []
+    block = data.get(code) or {}
+    rows = block.get("qfqday") or block.get("day") or []
+    prices = []
+    for r in rows:
+        if isinstance(r, dict):
+            if "date" not in r:
+                continue
+            date, o, c, h, l, v = (
+                r.get("date"), r.get("open"), r.get("close"),
+                r.get("high"), r.get("low"), r.get("volume"),
+            )
+        elif isinstance(r, (list, tuple)) and len(r) >= 6:
+            date, o, c, h, l, v = r[0], r[1], r[2], r[3], r[4], r[5]
+        else:
+            continue
+        prices.append(
+            Price(
+                open=_to_float(o),
+                close=_to_float(c),
+                high=_to_float(h),
+                low=_to_float(l),
+                volume=int(_to_float(v, 0) or 0),
+                time=str(date),
+            )
+        )
+    return prices
+
+
 def _map_company_facts(ticker: str, row: dict) -> CompanyFacts:
     """Map a CNInfo profile row (stock_profile_cninfo) to CompanyFacts."""
     return CompanyFacts(
@@ -270,6 +328,10 @@ def _merge_abstract(
     return metrics
 
 
+# HK daily bars — Tencent's public quote feed (stable JSON, no token).
+_HK_TENCENT_URL = "https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get"
+
+
 class AkshareDataClient:
     """Free A-share DataClient. Lazily imports ``akshare`` (heavy dep)."""
 
@@ -292,29 +354,54 @@ class AkshareDataClient:
         interval: str = "day",
         interval_multiplier: int = 1,
     ) -> list[Price]:
-        symbol = normalize_ticker(ticker)
         if interval != "day" or interval_multiplier != 1:
             raise ValueError("AkshareDataClient only supports daily bars")
         ak = self._akshare()
         start, end = start_date.replace("-", ""), end_date.replace("-", "")
-        # EastMoney (qfq) first, then Sina (qfq), then Tencent (raw) —
-        # free scraping sources are flaky and sometimes blocked per-domain.
-        sources = [
-            lambda: self._fetch(
-                ak.stock_zh_a_hist, symbol=symbol, period="daily",
-                start_date=start, end_date=end, adjust="qfq",
-            ),
-            lambda: self._fetch(
-                ak.stock_zh_a_daily, symbol=_prefixed_symbol(symbol),
-                start_date=start, end_date=end, adjust="qfq",
-            ),
-            lambda: self._fetch(
-                ak.stock_zh_a_hist_tx, symbol=_prefixed_symbol(symbol),
-                start_date=start, end_date=end,
-            ),
-        ]
-        df = self._try_sources(sources)
-        prices = [_map_price(r) for r in df.to_dict("records")]
+
+        hk = _hk_code(ticker)
+        if hk is not None:
+            # HK: EastMoney daily (qfq) first, Tencent public JSON as the
+            # reliable fallback — akshare's other HK wrappers are broken on
+            # some networks (Sina feed format changed).
+            sources = [
+                lambda: self._fetch(
+                    ak.stock_hk_hist, symbol=hk, period="daily",
+                    start_date=start, end_date=end, adjust="qfq",
+                ),
+                lambda: self._fetch_hk_tencent(hk, start, end),
+            ]
+        else:
+            symbol = normalize_ticker(ticker)
+            # EastMoney (qfq) first, then Sina (qfq), then Tencent (raw) —
+            # free scraping sources are flaky and sometimes blocked per-domain.
+            # The index feed is the last resort: benchmark codes (e.g. 000300)
+            # are not stock feeds, and only matter when the stock sources fail
+            # or come back empty.
+            sources = [
+                lambda: self._fetch(
+                    ak.stock_zh_a_hist, symbol=symbol, period="daily",
+                    start_date=start, end_date=end, adjust="qfq",
+                ),
+                lambda: self._fetch(
+                    ak.stock_zh_a_daily, symbol=_prefixed_symbol(symbol),
+                    start_date=start, end_date=end, adjust="qfq",
+                ),
+                lambda: self._fetch(
+                    ak.stock_zh_a_hist_tx, symbol=_prefixed_symbol(symbol),
+                    start_date=start, end_date=end,
+                ),
+                lambda: self._fetch(
+                    ak.index_zh_a_hist, symbol=symbol, period="daily",
+                    start_date=start, end_date=end,
+                ),
+            ]
+        result = self._try_sources(sources)
+        if isinstance(result, list) and result and isinstance(result[0], Price):
+            prices = result  # already mapped (Tencent HK path)
+        else:
+            rows = result.to_dict("records") if hasattr(result, "to_dict") else (result or [])
+            prices = [_map_price(r) for r in rows]
         return [p for p in prices if start_date <= p.time <= end_date]
 
     # -- protocol: financial metrics (point-in-time) ----------------------
@@ -326,6 +413,10 @@ class AkshareDataClient:
         period: str = "ttm",
         limit: int = 10,
     ) -> list[FinancialMetrics]:
+        if _hk_code(ticker) is not None:
+            # No free point-in-time HK fundamentals feed — empty is a valid
+            # DataClient "no data" response; persona agents abstain on it.
+            return []
         symbol = normalize_ticker(ticker)
         ak = self._akshare()
         df = self._fetch(ak.stock_financial_analysis_indicator, symbol=symbol)
@@ -334,6 +425,19 @@ class AkshareDataClient:
         # Newest first; only rows provably public by end_date (no look-ahead).
         metrics.sort(key=lambda m: m.filing_date or "", reverse=True)
         return [m for m in metrics if m.filing_date and m.filing_date <= end_date][:limit]
+
+    def _fetch_hk_tencent(self, hk_code: str, start: str, end: str) -> list[Price]:
+        """HK daily bars from Tencent's public kline JSON endpoint.
+
+        ``start``/``end`` arrive as YYYYMMDD; the feed wants YYYY-MM-DD.
+        """
+        symbol = f"hk{hk_code}"
+        s = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
+        e = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+        params = {"param": f"{symbol},day,{s},{e},640,qfq"}
+        resp = requests.get(_HK_TENCENT_URL, params=params, timeout=30)
+        resp.raise_for_status()
+        return _map_hk_tencent_prices(resp.json(), symbol)
 
     def _fetch_abstract(self, ak, symbol: str) -> dict[str, dict[str, float]]:
         """Sina abstract wide table -> {report_period: {metric: value}}.
@@ -482,18 +586,25 @@ class AkshareDataClient:
         raise last
 
     def _try_sources(self, sources: list) -> object:
-        """Return the first source that succeeds; raise if all fail.
+        """Return the first source that yields non-empty data; else raise.
 
         Each source is a zero-arg callable (a closure over a single AkShare
         endpoint). Failures fall through to the next source — a per-domain
-        block on one scraper must not take down the pipeline.
+        block on one scraper must not take down the pipeline. A result that
+        is None or empty (len 0) also falls through: for benchmark index
+        codes the stock feeds return empty and the index feed is the real
+        source.
         """
         last: Exception | None = None
         for source in sources:
             try:
-                return source()
+                result = source()
             except Exception as exc:  # noqa: BLE001 — fall through, next source
                 last = exc
                 logger.warning("price source failed: %s", exc)
-        assert last is not None
-        raise last
+                continue
+            if result is not None and len(result) > 0:
+                return result
+        if last is not None:
+            raise last
+        raise ValueError("all price sources returned no data")
