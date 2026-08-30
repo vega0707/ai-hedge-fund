@@ -46,8 +46,17 @@ Keys exported in your shell always win over the saved file.
 ### Free A-share mode (no API keys)
 
 Set `AIHF_DATA_PROVIDER=akshare` to run the whole pipeline against mainland
-A-shares with **no paid data key** — prices, fundamentals, news, and company
-profiles come from AkShare's free endpoints (EastMoney / Sina / CNInfo).
+A-shares and HK stocks with **no paid data key**. The free data stack:
+
+| Data | Source | Cost | PIT |
+|---|---|---|---|
+| A-share daily bars | AkShare (EastMoney → Sina → Tencent fallback) | free | ✅ |
+| HK daily bars | Tencent public kline JSON | free | ✅ |
+| Fundamentals (ROE, margins, leverage…) | Sina analysis-indicator + abstract backfill | free | ✅ |
+| **P/E & P/B (peTTM / pbMRQ)** | **baostock** (no registration) | free | ✅ |
+| Company profile | CNInfo | free | ~ (latest) |
+| News | EastMoney news feed | free | ✅ |
+| LLM | `auto(free)` via the Chengxiaobang gateway | free | — |
 
 ```bash
 export AIHF_DATA_PROVIDER=akshare
@@ -63,15 +72,17 @@ aihf hedge_fund/fund/china.yaml --tickers 300679,0700.HK
 ```
 
 `--tickers` accepts A-share spellings: `600519`, `sh600519`, `600519.SH`,
-`600519.SS`. Only the LLM key is still required for the persona agents
-(buffett, graham, …); quant models (`pead`, `greenblatt`) run keyless.
+`600519.SS`; HK: `0700.HK`, `hk00700`, `9988`. Only the LLM key is still
+required for the persona agents (buffett, graham, …); quant models
+(`pead`, `greenblatt`) run keyless.
 
 Known free-feed limits: point-in-time filing dates are approximated with the
-CSRC disclosure deadline (conservative, never look-ahead); market cap is not
-exposed (needs a share count), but **P/E and P/B now come from baostock**
-(free, no registration, daily point-in-time peTTM/pbMRQ), so the personas
-can actually judge valuation. `greenblatt` still derives earnings yield
-from EPS/price as a cross-check.
+CSRC disclosure deadline (conservative, never look-ahead); **market cap is
+not available** — every free feed lacks a share count (EastMoney has it but
+is blocked on many networks and is real-time, not PIT), and the personas
+judge valuation from P/E and P/B instead. `greenblatt` still derives
+earnings yield from EPS/price as a cross-check. HK fundamentals are not
+free-fed, so personas abstain on HK names while prices/trading still work.
 
 ## How to Run
 
