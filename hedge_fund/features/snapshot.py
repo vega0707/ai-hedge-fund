@@ -85,22 +85,21 @@ class FundamentalsSnapshot(BaseModel):
         could associate with post-date world events.
         """
         lines = [
-            f"Company: {self.ticker}"
-            + (f"  |  Sector: {self.sector}" if self.sector else "")
-            + (f"  |  Industry: {self.industry}" if self.industry else ""),
-            "All figures below were publicly filed by their filing dates. "
-            "Treat the most recent filing shown as the present.",
+            f"公司：{self.ticker}"
+            + (f"  |  行业板块：{self.sector}" if self.sector else "")
+            + (f"  |  所属行业：{self.industry}" if self.industry else ""),
+            "以下所有数据均已按披露日期在相应时点公开。请把最近一次披露视为当前时点。",
             "",
-            "Summary:",
-            f"  Market cap (latest filed): {_fmt(self.market_cap_latest)}",
-            f"  ROE avg: {_fmt(self.roe_avg)}  |  Net margin avg: {_fmt(self.net_margin_avg)}",
-            f"  Gross margin trend (latest-oldest): {_fmt(self.gross_margin_trend)}",
-            f"  Book value/share CAGR: {_fmt(self.bvps_cagr)}",
-            f"  Debt/equity (latest): {_fmt(self.debt_to_equity_latest)}",
+            "摘要：",
+            f"  市值（最新披露）：{_fmt(self.market_cap_latest)}",
+            f"  平均ROE：{_fmt(self.roe_avg)}  |  平均净利率：{_fmt(self.net_margin_avg)}",
+            f"  毛利率趋势（最新-最早）：{_fmt(self.gross_margin_trend)}",
+            f"  每股账面价值年化增长：{_fmt(self.bvps_cagr)}",
+            f"  负债/权益（最新）：{_fmt(self.debt_to_equity_latest)}",
             "",
-            "History (trailing-twelve-month periods, newest first):",
-            "period | filed | mktcap | P/E | ROE | gross_m | op_m | net_m | D/E "
-            "| curr | rev_gr | EPS | BVPS | FCF/sh",
+            "历史（滚动十二个月期，最新在前）：",
+            "报告期 | 披露日 | 市值 | 市盈率 | ROE | 毛利率 | 营业利润率 | "
+            "净利率 | 负债/权益 | 流动比率 | 营收增速 | 每股收益 | 每股净资产 | 每股现金流",
         ]
         for p in self.periods:
             lines.append(

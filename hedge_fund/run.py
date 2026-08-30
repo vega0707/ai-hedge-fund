@@ -135,7 +135,7 @@ def main() -> None:
 
     broker = SimBroker(cash=spec.capital)
 
-    with FDClient() as raw:
+    with make_data_client() as raw:
         fd = CachedDataClient(raw)
         n_models = sum(len(staff) for _, staff in fund.strategies)
         with console.status(

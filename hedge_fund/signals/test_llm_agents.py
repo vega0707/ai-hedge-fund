@@ -176,7 +176,7 @@ def test_prompt_and_response_persisted(tmp_path):
     assert len(records) == 1
     record = json.loads(records[0].read_text())
     assert record["agent"] == "buffett"
-    assert "You are Warren Buffett" in record["system"]
+    assert "你是沃伦·巴菲特" in record["system"]
     assert "2024-12-31" in record["user"]  # the rendered snapshot
     assert record["response"] == BULLISH
     assert record["parsed"]["signal"] == "bullish"
@@ -217,8 +217,8 @@ def test_llm_personas_share_the_contract(tmp_path):
         if not issubclass(cls, LLMAgent):
             continue
         prompt = cls(llm=FakeLLM(), cache=PromptCache(tmp_path / "llm")).get_system_prompt()
-        assert "most recent filing date" in prompt  # the point-in-time hard rule
-        assert '"signal"' in prompt and '"confidence"' in prompt  # the schema
+        assert "披露日期" in prompt  # the point-in-time hard rule (zh)
+        assert '"signal"' in prompt and '"confidence"' in prompt  # the schema stays JSON
 
 
 # ---------------------------------------------------------------------------

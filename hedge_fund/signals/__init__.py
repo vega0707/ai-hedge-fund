@@ -9,23 +9,37 @@ quant models (pure math).
 from __future__ import annotations
 
 from hedge_fund.signals.base import AlphaModel, QuantModel
+from hedge_fund.signals.ackman import AckmanAgent
 from hedge_fund.signals.buffett import BuffettAgent
+from hedge_fund.signals.burry import BurryAgent
+from hedge_fund.signals.dalio import DalioAgent
 from hedge_fund.signals.druckenmiller import DruckenmillerAgent
 from hedge_fund.signals.graham import GrahamAgent
+from hedge_fund.signals.greenblatt import GreenblattModel
 from hedge_fund.signals.llm_agent import LLMAgent
 from hedge_fund.signals.lynch import LynchAgent
+from hedge_fund.signals.marks import MarksAgent
 from hedge_fund.signals.munger import MungerAgent
+from hedge_fund.signals.neff import NeffAgent
 from hedge_fund.signals.pead import PEADModel
+from hedge_fund.signals.templeton import TempletonAgent
 
 ALPHA_MODEL_REGISTRY: dict[str, type[AlphaModel]] = {
     # Quant models
     "pead": PEADModel,
+    "greenblatt": GreenblattModel,
     # LLM investor agents
     "buffett": BuffettAgent,
     "munger": MungerAgent,
     "graham": GrahamAgent,
     "lynch": LynchAgent,
     "druckenmiller": DruckenmillerAgent,
+    "burry": BurryAgent,
+    "marks": MarksAgent,
+    "dalio": DalioAgent,
+    "ackman": AckmanAgent,
+    "templeton": TempletonAgent,
+    "neff": NeffAgent,
 }
 
 __all__ = [
@@ -37,6 +51,13 @@ __all__ = [
     "GrahamAgent",
     "LynchAgent",
     "DruckenmillerAgent",
+    "BurryAgent",
+    "MarksAgent",
+    "DalioAgent",
+    "AckmanAgent",
+    "TempletonAgent",
+    "NeffAgent",
     "PEADModel",
+    "GreenblattModel",
     "ALPHA_MODEL_REGISTRY",
 ]

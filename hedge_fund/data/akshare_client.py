@@ -1,0 +1,499 @@
+"""Free A-share data client (AkShare) — a DataClient protocol implementation.
+
+No API key, no registration: everything comes from AkShare's free scraping
+endpoints (EastMoney / Sina). Implements
+``hedge_fund.data.protocol.DataClient`` so the whole v2 pipeline (snapshots,
+LLM agents, backtesting) works against A-shares unchanged.
+
+Point-in-time contract
+----------------------
+``get_financial_metrics`` MUST return only rows public by *end_date* (no
+look-ahead). AkShare's analysis-indicator endpoint has no filing date, so
+we approximate with the CSRC disclosure deadline: Q1 -> 04-30, H1 -> 08-31,
+Q3 -> 10-31, annual -> 04-30 next year. Real filings are never later than
+their deadline, so this is a conservative public-by date — a backtest can
+never see a period before it was really knowable (it may lag reality by up
+to the disclosure window, which biases *against* the strategy, not for it).
+
+Scope limits (fail loudly or stay empty, per protocol):
+- Daily bars only; other intervals raise ValueError.
+- Insider trades / earnings feeds are not available for free with
+  point-in-time guarantees — returned as empty (valid "no data" response).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import time
+from datetime import datetime
+
+from hedge_fund.data.models import (
+    CompanyFacts,
+    CompanyNews,
+    FinancialMetrics,
+    Price,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Pure mapping helpers (unit-tested in test_akshare_client.py)
+# ---------------------------------------------------------------------------
+
+def normalize_ticker(ticker: str) -> str:
+    """Normalize A-share ticker spellings to plain 6 digits.
+
+    Accepts ``600519``, ``sh600519``, ``600519.SH``, ``600519.SS``,
+    ``000001.SZ``. Raises ValueError for anything that is not a mainland
+    A-share code (e.g. US/HK tickers) — fail loudly rather than silently
+    returning garbage to the pipeline.
+    """
+    t = ticker.strip().lower()
+    t = re.sub(r"\.(sh|sz|bj|ss)$", "", t)  # strip exchange suffix
+    t = re.sub(r"^(sh|sz|bj)", "", t)        # strip exchange prefix
+    if re.fullmatch(r"\d{6}", t):
+        return t
+    raise ValueError(
+        f"{ticker!r} is not an A-share code (expected 6 digits, e.g. 600519)"
+    )
+
+
+def _filing_deadline(report_period: str) -> str:
+    """CSRC disclosure deadline for a report period (-> YYYY-MM-DD).
+
+    Accepts both 'YYYYMMDD' and 'YYYY-MM-DD' spellings. Q1 -> 04-30,
+    H1 -> 08-31, Q3 -> 10-31, annual -> 04-30 next year.
+    """
+    compact = report_period.replace("-", "").strip()
+    try:
+        dt = datetime.strptime(compact, "%Y%m%d")
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid report period {report_period!r} (expected YYYYMMDD)"
+        ) from exc
+    if dt.month == 3 and dt.day == 31:
+        return dt.strftime("%Y-04-30")
+    if dt.month == 6 and dt.day == 30:
+        return dt.strftime("%Y-08-31")
+    if dt.month == 9 and dt.day == 30:
+        return dt.strftime("%Y-10-31")
+    if dt.month == 12 and dt.day == 31:
+        return f"{dt.year + 1}-04-30"
+    raise ValueError(
+        f"report period {report_period!r} is not a quarter end "
+        "(03-31 / 06-30 / 09-30 / 12-31)"
+    )
+
+
+def _to_float(value, default=None):
+    """Coerce to float; NaN/'-'/''/None all map to *default*."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if value in ("", "-", "--", "None"):
+            return default
+    try:
+        f = float(value)
+        return default if (f != f) else f  # NaN -> default
+    except (TypeError, ValueError):
+        return default
+
+
+def _prefixed_symbol(ticker: str) -> str:
+    """A-share 6-digit code -> Sina/Tencent symbol ('sh600519', 'sz000001')."""
+    code = normalize_ticker(ticker)
+    return ("sh" if code.startswith(("6", "9")) else "sz") + code
+
+
+def _map_price(row: dict) -> Price:
+    """Map a daily-bar row to a Price.
+
+    EastMoney feeds use Chinese column names; Sina/Tencent feeds use
+    english ones — both are accepted.
+    """
+    date = row.get("日期") or row.get("date")
+    volume = row.get("成交量") or row.get("volume")
+    return Price(
+        open=_to_float(row.get("开盘") or row.get("open")),
+        close=_to_float(row.get("收盘") or row.get("close")),
+        high=_to_float(row.get("最高") or row.get("high")),
+        low=_to_float(row.get("最低") or row.get("low")),
+        volume=int(_to_float(volume, 0) or 0),
+        time=str(date),
+    )
+
+
+# Field -> candidate Sina column names, tried in order. Real columns carry
+# unit suffixes ('净资产收益率(%)'); aliases keep older/sparser feeds working.
+_COLUMN_ALIASES: dict[str, list[str]] = {
+    # Percent columns -> /100 to the FD decimal convention
+    "gross_margin": ["销售毛利率(%)", "销售毛利率"],
+    "operating_margin": ["营业利润率(%)", "主营业务利润率(%)", "营业利润率"],
+    "net_margin": ["销售净利率(%)", "销售净利率"],
+    "return_on_equity": ["净资产收益率(%)", "净资产收益率"],
+    "return_on_assets": ["总资产净利润率(%)", "总资产净利润率"],
+    "debt_to_assets": ["资产负债率(%)", "资产负债率"],
+    "debt_to_equity": ["负债与所有者权益比率(%)", "负债与所有者权益比率"],
+    "revenue_growth": ["主营业务收入增长率(%)", "主营业务收入增长率"],
+    "earnings_growth": ["净利润增长率(%)", "净利润增长率"],
+    "book_value_growth": ["净资产增长率(%)", "净资产增长率"],
+    # Ratio multiples / absolute values
+    "current_ratio": ["流动比率"],
+    "quick_ratio": ["速动比率"],
+    "price_to_earnings_ratio": ["市盈率(倍)", "市盈率"],
+    "price_to_book_ratio": ["市净率(倍)", "市净率"],
+    "market_cap": ["总市值(元)", "总市值"],
+    "earnings_per_share": ["摊薄每股收益(元)", "加权每股收益(元)", "每股收益(元)"],
+    "book_value_per_share": [
+        "每股净资产_调整前(元)", "每股净资产_调整后(元)", "每股净资产(元)",
+    ],
+    "free_cash_flow_per_share": [
+        "每股经营性现金流(元)", "每股经营现金流(元)", "每股经营活动产生的现金流量净额(元)",
+    ],
+}
+
+_PERCENT_FIELDS = {
+    "gross_margin",
+    "operating_margin",
+    "net_margin",
+    "return_on_equity",
+    "return_on_assets",
+    "debt_to_assets",
+    "debt_to_equity",
+    "revenue_growth",
+    "earnings_growth",
+    "book_value_growth",
+}
+
+
+def _column_value(row: dict, aliases: list[str]):
+    """First non-empty value among candidate column names."""
+    for column in aliases:
+        value = row.get(column)
+        if _to_float(value) is not None:
+            return value
+    return None
+
+
+def _map_financial_metrics(ticker: str, row: dict) -> FinancialMetrics:
+    """Map a Sina analysis-indicator row to FinancialMetrics.
+
+    Only the columns Sina exposes are mapped; everything else stays null.
+    Percent columns are converted to the FD decimal convention (12.3 -> 0.123)
+    so snapshots and prompts are consistent with the US-data path.
+    ``filing_date`` is the CSRC disclosure-deadline approximation.
+    """
+    period = str(row.get("日期", "")).strip()
+    compact = period.replace("-", "")
+    if not compact or len(compact) != 8:
+        raise ValueError("financial metrics row missing report period (日期)")
+
+    values = {
+        field: _column_value(row, aliases)
+        for field, aliases in _COLUMN_ALIASES.items()
+    }
+    percent = {
+        field: _to_float(values[field]) / 100.0
+        for field in _PERCENT_FIELDS
+        if _to_float(values.get(field)) is not None
+    }
+    return FinancialMetrics(
+        ticker=ticker,
+        report_period=f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}",
+        period="ttm",
+        filing_date=_filing_deadline(period),
+        # Valuation
+        market_cap=_to_float(values.get("market_cap")),
+        price_to_earnings_ratio=_to_float(values.get("price_to_earnings_ratio")),
+        price_to_book_ratio=_to_float(values.get("price_to_book_ratio")),
+        # Profitability
+        gross_margin=percent.get("gross_margin"),
+        operating_margin=percent.get("operating_margin"),
+        net_margin=percent.get("net_margin"),
+        return_on_equity=percent.get("return_on_equity"),
+        return_on_assets=percent.get("return_on_assets"),
+        # Liquidity (ratio multiples, not percents)
+        current_ratio=_to_float(values.get("current_ratio")),
+        quick_ratio=_to_float(values.get("quick_ratio")),
+        # Leverage
+        debt_to_equity=percent.get("debt_to_equity"),
+        debt_to_assets=percent.get("debt_to_assets"),
+        # Growth
+        revenue_growth=percent.get("revenue_growth"),
+        earnings_growth=percent.get("earnings_growth"),
+        book_value_growth=percent.get("book_value_growth"),
+        # Per-share
+        earnings_per_share=_to_float(values.get("earnings_per_share")),
+        book_value_per_share=_to_float(values.get("book_value_per_share")),
+        free_cash_flow_per_share=_to_float(values.get("free_cash_flow_per_share")),
+    )
+
+
+# ---------------------------------------------------------------------------
+# DataClient implementation
+# ---------------------------------------------------------------------------
+
+def _map_company_facts(ticker: str, row: dict) -> CompanyFacts:
+    """Map a CNInfo profile row (stock_profile_cninfo) to CompanyFacts."""
+    return CompanyFacts(
+        ticker=ticker,
+        name=str(row.get("A股简称") or ""),
+        industry=str(row.get("所属行业") or ""),
+        exchange=str(row.get("所属市场") or ""),
+    )
+
+
+def _merge_abstract(
+    metrics: list[FinancialMetrics],
+    abstract: dict[str, dict[str, float]],
+) -> list[FinancialMetrics]:
+    """Backfill gross/net margin from the Sina abstract feed.
+
+    The analysis-indicator feed leaves 销售毛利率(%) NaN for recent periods;
+    the abstract wide table (stock_financial_abstract) still carries them.
+    Only fills missing values — never overwrites. Abstract keys accept both
+    'YYYYMMDD' and 'YYYY-MM-DD' report-period spellings.
+    """
+    for m in metrics:
+        period_data = abstract.get(
+            m.report_period.replace("-", "")
+        ) or abstract.get(m.report_period)
+        if not period_data:
+            continue
+        if m.gross_margin is None and "毛利率" in period_data:
+            m.gross_margin = period_data["毛利率"] / 100.0
+        if m.net_margin is None and "销售净利率" in period_data:
+            m.net_margin = period_data["销售净利率"] / 100.0
+    return metrics
+
+
+class AkshareDataClient:
+    """Free A-share DataClient. Lazily imports ``akshare`` (heavy dep)."""
+
+    def __init__(self) -> None:
+        self._ak = None
+
+    def __enter__(self) -> "AkshareDataClient":
+        return self
+
+    def __exit__(self, *args) -> None:
+        return None
+
+    # -- protocol: prices -------------------------------------------------
+
+    def get_prices(
+        self,
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        interval: str = "day",
+        interval_multiplier: int = 1,
+    ) -> list[Price]:
+        symbol = normalize_ticker(ticker)
+        if interval != "day" or interval_multiplier != 1:
+            raise ValueError("AkshareDataClient only supports daily bars")
+        ak = self._akshare()
+        start, end = start_date.replace("-", ""), end_date.replace("-", "")
+        # EastMoney (qfq) first, then Sina (qfq), then Tencent (raw) —
+        # free scraping sources are flaky and sometimes blocked per-domain.
+        sources = [
+            lambda: self._fetch(
+                ak.stock_zh_a_hist, symbol=symbol, period="daily",
+                start_date=start, end_date=end, adjust="qfq",
+            ),
+            lambda: self._fetch(
+                ak.stock_zh_a_daily, symbol=_prefixed_symbol(symbol),
+                start_date=start, end_date=end, adjust="qfq",
+            ),
+            lambda: self._fetch(
+                ak.stock_zh_a_hist_tx, symbol=_prefixed_symbol(symbol),
+                start_date=start, end_date=end,
+            ),
+        ]
+        df = self._try_sources(sources)
+        prices = [_map_price(r) for r in df.to_dict("records")]
+        return [p for p in prices if start_date <= p.time <= end_date]
+
+    # -- protocol: financial metrics (point-in-time) ----------------------
+
+    def get_financial_metrics(
+        self,
+        ticker: str,
+        end_date: str,
+        period: str = "ttm",
+        limit: int = 10,
+    ) -> list[FinancialMetrics]:
+        symbol = normalize_ticker(ticker)
+        ak = self._akshare()
+        df = self._fetch(ak.stock_financial_analysis_indicator, symbol=symbol)
+        metrics = [_map_financial_metrics(symbol, r) for r in df.to_dict("records")]
+        metrics = _merge_abstract(metrics, self._fetch_abstract(ak, symbol))
+        # Newest first; only rows provably public by end_date (no look-ahead).
+        metrics.sort(key=lambda m: m.filing_date or "", reverse=True)
+        return [m for m in metrics if m.filing_date and m.filing_date <= end_date][:limit]
+
+    def _fetch_abstract(self, ak, symbol: str) -> dict[str, dict[str, float]]:
+        """Sina abstract wide table -> {report_period: {metric: value}}.
+
+        Only the margin rows the main feed is missing are kept. The feed is
+        a nicety — if it fails, metrics simply keep their nulls.
+        """
+        try:
+            df = self._fetch(ak.stock_financial_abstract, symbol=symbol)
+        except Exception as exc:  # noqa: BLE001 — optional enrichment
+            logger.warning("abstract feed unavailable for %s: %s", symbol, exc)
+            return {}
+        out: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            name = str(row.get("指标") or "")
+            if name not in {"毛利率", "销售净利率"}:
+                continue
+            for column in df.columns[2:]:  # report-period columns
+                value = row.get(column)
+                if value is None or value != value:  # None or NaN
+                    continue
+                out.setdefault(str(column), {})[name] = float(value)
+        return out
+
+    # -- protocol: news ---------------------------------------------------
+
+    def get_news(
+        self,
+        ticker: str,
+        end_date: str,
+        start_date: str | None = None,
+        limit: int = 1000,
+    ) -> list[CompanyNews]:
+        symbol = normalize_ticker(ticker)
+        ak = self._akshare()
+        df = self._fetch(ak.stock_news_em, symbol=symbol)
+        news: list[CompanyNews] = []
+        for r in df.to_dict("records"):
+            date = str(r.get("发布时间") or "")[:10]
+            if not date or date > end_date:
+                continue
+            if start_date and date < start_date:
+                continue
+            news.append(
+                CompanyNews(
+                    ticker=symbol,
+                    title=str(r.get("新闻标题") or ""),
+                    source=str(r.get("文章来源") or ""),
+                    date=date,
+                    url=str(r.get("新闻链接") or ""),
+                )
+            )
+            if len(news) >= limit:
+                break
+        return news
+
+    # -- protocol: company facts ------------------------------------------
+
+    def get_company_facts(self, ticker: str) -> CompanyFacts | None:
+        symbol = normalize_ticker(ticker)
+        ak = self._akshare()
+        # EastMoney profile first, CNInfo as fallback (EastMoney is the
+        # flaky domain). Both missing -> None: company metadata is a slow
+        # variable, not a signal — absence degrades the snapshot's
+        # sector/industry lines, never the decision.
+        sources = [
+            lambda: self._fetch(ak.stock_individual_info_em, symbol=symbol),
+            lambda: self._fetch(ak.stock_profile_cninfo, symbol=symbol),
+        ]
+        try:
+            df = self._try_sources(sources)
+        except Exception as exc:  # noqa: BLE001 — non-critical metadata
+            logger.warning("company facts unavailable for %s: %s", symbol, exc)
+            return None
+        rows = df.to_dict("records")
+        if not rows:
+            return None
+        row = rows[0]
+        # EastMoney shape: item/value pairs; CNInfo shape: flat record.
+        if "item" in row and "value" in row:
+            info = dict(zip(df["item"], df["value"]))
+            return CompanyFacts(
+                ticker=symbol,
+                name=str(info.get("股票简称") or info.get("股票名称") or ""),
+                industry=str(info.get("行业") or ""),
+                exchange=str(info.get("交易所") or ""),
+            )
+        return _map_company_facts(symbol, row)
+
+    # -- protocol: feeds without a free point-in-time source --------------
+
+    def get_insider_trades(
+        self,
+        ticker: str,
+        end_date: str,
+        start_date: str | None = None,
+        limit: int = 1000,
+    ) -> list:
+        # No free holder-change feed with point-in-time guarantees; an empty
+        # list is a valid DataClient "no data" response.
+        return []
+
+    def get_earnings(self, ticker: str) -> None:
+        return None
+
+    def get_earnings_history(self, ticker: str, limit: int = 12) -> list:
+        return []
+
+    # -- protocol: convenience --------------------------------------------
+
+    def get_market_cap(self, ticker: str, end_date: str) -> float | None:
+        metrics = self.get_financial_metrics(ticker, end_date, limit=1)
+        return metrics[0].market_cap if metrics else None
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _akshare(self):
+        if self._ak is None:
+            import akshare  # heavy; import on first use
+            self._ak = akshare
+        return self._ak
+
+    def _fetch(self, fn, *args, retries: int = 3, delay: float = 2.0, **kwargs):
+        """Call ``fn(*args, **kwargs)`` retrying transient failures.
+
+        AkShare scrapes public Chinese-finance endpoints that routinely
+        drop connections; a bounded retry is the pragmatic fix. After
+        exhausting retries the last exception propagates — infrastructure
+        failures stay loud, they never become empty data.
+        """
+        last: Exception | None = None
+        for attempt in range(retries):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — any source error is retryable
+                last = exc
+                logger.warning(
+                    "akshare call failed (attempt %d/%d): %s",
+                    attempt + 1, retries, exc,
+                )
+                if attempt < retries - 1:
+                    time.sleep(delay)
+        assert last is not None
+        raise last
+
+    def _try_sources(self, sources: list) -> object:
+        """Return the first source that succeeds; raise if all fail.
+
+        Each source is a zero-arg callable (a closure over a single AkShare
+        endpoint). Failures fall through to the next source — a per-domain
+        block on one scraper must not take down the pipeline.
+        """
+        last: Exception | None = None
+        for source in sources:
+            try:
+                return source()
+            except Exception as exc:  # noqa: BLE001 — fall through, next source
+                last = exc
+                logger.warning("price source failed: %s", exc)
+        assert last is not None
+        raise last

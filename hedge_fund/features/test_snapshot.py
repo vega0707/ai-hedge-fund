@@ -119,4 +119,4 @@ def test_render_contains_the_facts():
     text = snap.render()
     assert "2025-01-15" not in text  # as_of must never leak into the prompt
     assert "2024-12-31" in text
-    assert "publicly filed" in text
+    assert "披露日期" in text

@@ -11,14 +11,25 @@
 name: example-fund
 strategies:
   - name: deep-value          # discretionary pod: Graham-led, long-biased
-    weight: 0.6               # capital slice, relative to sibling strategies
+    weight: 0.5               # capital slice, relative to sibling strategies
     models:
       - name: graham
         weight: 2.0
       - name: buffett
       - name: munger
+      - name: burry
+      - name: templeton
+      - name: neff
+      - name: greenblatt        # Magic Formula — pure quant, no LLM cost
+  - name: quality-masters     # discretionary pod: quality & risk-first personas
+    weight: 0.3
+    models:
+      - name: ackman
+      - name: marks
+      - name: dalio
+      - name: lynch
   - name: earnings-drift      # systematic pod: post-earnings drift
-    weight: 0.4
+    weight: 0.2
     models:
       - name: pead
 risk:

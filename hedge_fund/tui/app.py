@@ -58,7 +58,7 @@ from textual.widgets.selection_list import Selection
 from hedge_fund.backtesting import FundBacktestResult, backtest_fund, rebalance_grid
 from hedge_fund.backtesting.fund import _PERIODS_PER_YEAR
 from hedge_fund.brokers import Fill, SimBroker
-from hedge_fund.data import CachedDataClient, FDClient
+from hedge_fund.data import CachedDataClient, make_data_client
 from hedge_fund.fund import (
     Fund,
     FundSpec,
@@ -1226,7 +1226,7 @@ class RunScreen(Screen):
                 # no client and simply runs.
                 model = (cls(llm=make_llm(on_token=desk.feed))
                          if issubclass(cls, LLMAgent) else cls())
-                with FDClient() as raw:
+                with make_data_client() as raw:
                     fd = CachedDataClient(raw)
                     for ticker in universe:
                         desk.begin(ticker)
@@ -1243,7 +1243,7 @@ class RunScreen(Screen):
 
             fund = Fund(spec)
             broker = SimBroker(cash=spec.capital)
-            with FDClient() as raw:
+            with make_data_client() as raw:
                 record = run_cycle(fund, as_of, broker, CachedDataClient(raw),
                                    universe)
 
@@ -1770,7 +1770,7 @@ class BacktestScreen(Screen):
              universe: list[str]) -> None:
         app = self.app
         try:
-            with FDClient() as raw:
+            with make_data_client() as raw:
                 bars = CachedDataClient(raw).get_prices(spec.benchmark, start, end)
             closes = {b.time[:10]: b.close for b in bars
                       if start <= b.time[:10] <= end}
@@ -1796,7 +1796,7 @@ class BacktestScreen(Screen):
                 if dwell > 0:
                     time.sleep(dwell)
 
-            with FDClient() as raw:
+            with make_data_client() as raw:
                 result = backtest_fund(fund, start, end, CachedDataClient(raw),
                                        universe, on_cycle=tick)
 
@@ -1825,7 +1825,7 @@ class BacktestScreen(Screen):
         bar = self.query_one("#warm-progress", ProgressBar)
 
         def prefetch(ticker: str, dates: list[str]) -> None:
-            with FDClient() as raw:  # own client per task (requests isn't shared-safe)
+            with make_data_client() as raw:  # own client per task (requests isn't shared-safe)
                 fd = CachedDataClient(raw)
                 if has_agents:
                     fd.get_company_facts(ticker)
@@ -1855,7 +1855,7 @@ class BacktestScreen(Screen):
         def warm(agent_name: str) -> None:
             who = display[agent_name]
             model = ALPHA_MODEL_REGISTRY[agent_name]()  # own instance per thread
-            with FDClient() as raw:
+            with make_data_client() as raw:
                 fd = CachedDataClient(raw)
                 for as_of in grid:
                     for ticker in universe:

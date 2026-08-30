@@ -43,6 +43,26 @@ The app asks for keys the first time it needs them and saves them to `~/.hedge-f
 
 Keys exported in your shell always win over the saved file.
 
+### Free A-share mode (no API keys)
+
+Set `AIHF_DATA_PROVIDER=akshare` to run the whole pipeline against mainland
+A-shares with **no paid data key** — prices, fundamentals, news, and company
+profiles come from AkShare's free endpoints (EastMoney / Sina / CNInfo).
+
+```bash
+export AIHF_DATA_PROVIDER=akshare
+aihf ~/.hedge-fund/mandates/example.yaml --tickers 600519,000001
+```
+
+`--tickers` accepts A-share spellings: `600519`, `sh600519`, `600519.SH`,
+`600519.SS`. Only the LLM key is still required for the persona agents
+(buffett, graham, …); quant models (`pead`, `greenblatt`) run keyless.
+
+Known free-feed limits: point-in-time filing dates are approximated with the
+CSRC disclosure deadline (conservative, never look-ahead); market cap and
+P/E are not exposed, so `greenblatt` derives earnings yield from EPS/price
+instead.
+
 ## How to Run
 
 ### Interactive app
