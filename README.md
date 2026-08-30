@@ -67,9 +67,11 @@ aihf hedge_fund/fund/china.yaml --tickers 300679,0700.HK
 (buffett, graham, …); quant models (`pead`, `greenblatt`) run keyless.
 
 Known free-feed limits: point-in-time filing dates are approximated with the
-CSRC disclosure deadline (conservative, never look-ahead); market cap and
-P/E are not exposed, so `greenblatt` derives earnings yield from EPS/price
-instead.
+CSRC disclosure deadline (conservative, never look-ahead); market cap is not
+exposed (needs a share count), but **P/E and P/B now come from baostock**
+(free, no registration, daily point-in-time peTTM/pbMRQ), so the personas
+can actually judge valuation. `greenblatt` still derives earnings yield
+from EPS/price as a cross-check.
 
 ## How to Run
 

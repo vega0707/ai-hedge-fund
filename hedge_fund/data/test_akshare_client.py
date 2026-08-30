@@ -18,12 +18,15 @@ import pytest
 
 from hedge_fund.data.akshare_client import (
     AkshareDataClient,
+    _apply_valuation,
+    _baostock_symbol,
     _filing_deadline,
     _hk_code,
     _map_company_facts,
     _map_financial_metrics,
     _map_hk_tencent_prices,
     _map_price,
+    _match_valuation,
     _merge_abstract,
     _prefixed_symbol,
     normalize_ticker,
@@ -341,6 +344,52 @@ def test_merge_abstract_accepts_iso_period_key() -> None:
 def test_merge_abstract_missing_period_leaves_metrics_alone() -> None:
     metrics = [_map_financial_metrics("600519", {"日期": "20240930"})]
     assert _merge_abstract(metrics, {"20240331": {"毛利率": 91.0}})[0].gross_margin is None
+
+
+# ---------------------------------------------------------------------------
+# Baostock valuation backfill (free peTTM/pbMRQ, point-in-time by date)
+# ---------------------------------------------------------------------------
+
+def test_baostock_symbol_sh() -> None:
+    assert _baostock_symbol("600519") == "sh.600519"
+    assert _baostock_symbol("688981") == "sh.688981"
+
+
+def test_baostock_symbol_sz() -> None:
+    assert _baostock_symbol("000001") == "sz.000001"
+    assert _baostock_symbol("300679") == "sz.300679"
+
+
+def test_match_valuation_latest_on_or_before() -> None:
+    rows = [
+        ("2026-08-26", "20.1", "6.4"),
+        ("2026-08-27", "19.8", "6.4"),
+        ("2026-08-28", "19.9", "6.5"),
+    ]
+    assert _match_valuation(rows, "2026-08-28") == (19.9, 6.5)
+    assert _match_valuation(rows, "2026-08-27") == (19.8, 6.4)
+    assert _match_valuation(rows, "2026-08-20") is None  # before any row
+
+
+def test_apply_valuation_fills_pe_pb_but_not_market_cap() -> None:
+    metrics = [
+        _map_financial_metrics(
+            "600519", {"日期": "20260331", "每股净资产_调整前(元)": 150.2}
+        )
+    ]
+    valuation = {"2026-03-31": {"pe": 19.9, "pb": 6.45}}
+    _apply_valuation(metrics, valuation)
+    assert metrics[0].price_to_earnings_ratio == 19.9
+    assert metrics[0].price_to_book_ratio == 6.45
+    # Market cap needs a share count the free feeds don't expose; PB x BVPS
+    # would be the share PRICE, not the cap — so it stays null.
+    assert metrics[0].market_cap is None
+
+
+def test_apply_valuation_leaves_rows_without_match_alone() -> None:
+    metrics = [_map_financial_metrics("600519", {"日期": "20240331"})]
+    _apply_valuation(metrics, {})
+    assert metrics[0].price_to_earnings_ratio is None
 
 
 # ---------------------------------------------------------------------------

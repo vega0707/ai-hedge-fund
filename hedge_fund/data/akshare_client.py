@@ -294,6 +294,51 @@ def _map_hk_tencent_prices(payload: dict, code: str) -> list[Price]:
     return prices
 
 
+def _baostock_symbol(ticker: str) -> str:
+    """A-share 6-digit code -> baostock symbol ('sh.600519', 'sz.300679')."""
+    code = normalize_ticker(ticker)
+    return ("sh" if code.startswith(("6", "9")) else "sz") + "." + code
+
+
+def _match_valuation(
+    rows: list[tuple[str, str, str]], date: str
+) -> tuple[float, float] | None:
+    """Latest (pe, pb) with row date <= *date* from date-ascending rows.
+
+    baostock peTTM/pbMRQ are daily point-in-time values — the right one
+    for a period is the last trading day on or before its filing date.
+    """
+    best: tuple[str, str] | None = None
+    for row_date, pe, pb in rows:
+        if row_date <= date:
+            best = (pe, pb)
+        else:
+            break
+    if best is None:
+        return None
+    pe, pb = best
+    return _to_float(pe), _to_float(pb)
+
+
+def _apply_valuation(
+    metrics: list[FinancialMetrics],
+    valuation: dict[str, dict[str, float]],
+) -> list[FinancialMetrics]:
+    """Fill price_to_earnings_ratio / price_to_book_ratio from baostock.
+
+    Market cap is NOT derived here: PB x BVPS is the share price, not the
+    market cap — a true cap needs a share count, which the free feeds don't
+    expose. PE/PB alone let the personas judge valuation.
+    """
+    for m in metrics:
+        v = valuation.get(m.report_period)
+        if not v:
+            continue
+        m.price_to_earnings_ratio = v.get("pe")
+        m.price_to_book_ratio = v.get("pb")
+    return metrics
+
+
 def _map_company_facts(ticker: str, row: dict) -> CompanyFacts:
     """Map a CNInfo profile row (stock_profile_cninfo) to CompanyFacts."""
     return CompanyFacts(
@@ -422,6 +467,7 @@ class AkshareDataClient:
         df = self._fetch(ak.stock_financial_analysis_indicator, symbol=symbol)
         metrics = [_map_financial_metrics(symbol, r) for r in df.to_dict("records")]
         metrics = _merge_abstract(metrics, self._fetch_abstract(ak, symbol))
+        metrics = _apply_valuation(metrics, self._fetch_baostock_valuation(symbol, metrics, end_date))
         # Newest first; only rows provably public by end_date (no look-ahead).
         metrics.sort(key=lambda m: m.filing_date or "", reverse=True)
         return [m for m in metrics if m.filing_date and m.filing_date <= end_date][:limit]
@@ -438,6 +484,53 @@ class AkshareDataClient:
         resp = requests.get(_HK_TENCENT_URL, params=params, timeout=30)
         resp.raise_for_status()
         return _map_hk_tencent_prices(resp.json(), symbol)
+
+    def _fetch_baostock_valuation(
+        self,
+        symbol: str,
+        metrics: list[FinancialMetrics],
+        end_date: str,
+    ) -> dict[str, dict[str, float]]:
+        """Free daily peTTM/pbMRQ from baostock, matched to each filing date.
+
+        One range query covers all periods; rows before any filing date are
+        ignored (point-in-time). A baostock outage must not take down the
+        fundamentals — empty map, metrics keep their nulls.
+        """
+        filing_dates = [m.filing_date for m in metrics if m.filing_date]
+        if not filing_dates:
+            return {}
+        bs_symbol = _baostock_symbol(symbol)  # 600519 -> sh.600519
+        try:
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code != "0":
+                logger.warning("baostock login failed: %s", lg.error_msg)
+                return {}
+            try:
+                rs = bs.query_history_k_data_plus(
+                    bs_symbol, "date,peTTM,pbMRQ",
+                    start_date=min(filing_dates), end_date=end_date,
+                    frequency="d", adjustflag="3",
+                )
+                rows = []
+                while rs.error_code == "0" and rs.next():
+                    d = rs.get_row_data()
+                    if d and d[0] and d[1] != "" and d[2] != "":
+                        rows.append((d[0], d[1], d[2]))
+            finally:
+                bs.logout()
+        except Exception as exc:  # noqa: BLE001 — optional enrichment
+            logger.warning("baostock valuation unavailable for %s: %s", symbol, exc)
+            return {}
+        rows.sort()
+        return {
+            m.report_period: {"pe": pe, "pb": pb}
+            for m in metrics
+            if (matched := _match_valuation(rows, m.filing_date or "")) is not None
+            for pe, pb in [matched]
+            if pe is not None or pb is not None
+        }
 
     def _fetch_abstract(self, ak, symbol: str) -> dict[str, dict[str, float]]:
         """Sina abstract wide table -> {report_period: {metric: value}}.
