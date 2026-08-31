@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# run_daily.sh · 每日持仓分析 + 邮件推送
+# run_daily.sh · 每日持仓分析 + Hermes 微信推送
 # 用法: ./run_daily.sh [--dry-run]
-# dry-run: 只跑分析不发邮件，结果输出到 stdout
+# dry-run: 只跑分析不发通知，结果输出到 stdout
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$BASE_DIR/config"
 LOG_DIR="$BASE_DIR/logs"
 TICKERS_FILE="$CONFIG_DIR/tickers.yaml"
-SMTP_FILE="$CONFIG_DIR/smtp.yaml"
 MANDATE="$BASE_DIR/fund/china-daily.yaml"
 VENV="$BASE_DIR/.venv"
 DATE=$(date +%Y-%m-%d)
@@ -58,13 +57,53 @@ else
     python3 -m hedge_fund.run "$MANDATE" --tickers "$TICKERS" --out "$JSON_OUT"
     echo "[$DATE] 分析完成 → $JSON_OUT"
 
-    # ---- 发送邮件 ----
-    if [[ -f "$SMTP_FILE" ]] && [[ -f "$JSON_OUT" ]]; then
-        python3 "$BASE_DIR/scripts/push_email.py" "$JSON_OUT" "$DATE"
-        echo "[$DATE] 邮件已发送"
+    # ---- 通过 Hermes 发送微信通知 ----
+    if [[ -f "$JSON_OUT" ]]; then
+        # 查找 hermes 命令
+        HERMES_BIN=$(command -v hermes 2>/dev/null || echo "/home/ubuntu/.local/bin/hermes")
+        
+        if [[ -x "$HERMES_BIN" ]]; then
+            # 生成简洁的文本摘要
+            SUMMARY=$(python3 <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+json_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("$JSON_OUT")
+if not json_path.exists():
+    print("分析结果不存在")
+    sys.exit(0)
+
+with open(json_path) as f:
+    data = json.load(f)
+
+lines = []
+for strat in data.get("strategies", []):
+    lines.append(f"  策略：{strat.get('name', 'unknown')}")
+    for sig in strat.get("signals", []):
+        ticker = sig.get("ticker", "?")
+        model = sig.get("model_name", "?")
+        value = sig.get("value", 0)
+        reasoning = sig.get("reasoning", "")[:80]
+        emoji = "" if value > 0.3 else "🔴" if value < -0.3 else "⚪"
+        lines.append(f"    {emoji} {ticker} · {model}: {value:+.2f} · {reasoning}")
+
+print("\n".join(lines))
+PYEOF
+            "$JSON_OUT")
+
+            # 发送微信消息
+            echo "[$DATE] 通过 Hermes 发送微信通知..."
+            echo "$SUMMARY" | "$HERMES_BIN" send --to weixin \
+                --subject "📊 持仓日报 · $DATE" \
+                2>&1 | tee -a "$LOG_DIR/hermes.log"
+            
+            echo "[$DATE] 通知已发送"
+        else
+            echo "[WARN] hermes 命令不可用，跳过通知" >&2
+        fi
     else
-        [[ ! -f "$SMTP_FILE" ]] && echo "[WARN] smtp.yaml 不存在，跳过邮件" >&2
-        [[ ! -f "$JSON_OUT" ]] && echo "[WARN] 分析结果不存在，跳过邮件" >&2
+        echo "[WARN] 分析结果不存在，跳过通知" >&2
     fi
 fi
 
