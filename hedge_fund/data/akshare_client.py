@@ -818,6 +818,10 @@ class AkshareDataClient:
     # -- protocol: company facts ------------------------------------------
 
     def get_company_facts(self, ticker: str) -> CompanyFacts | None:
+        if _hk_code(ticker) is not None:
+            # No free HK company-profile feed — None is a valid "no data"
+            # response; the snapshot degrades sector/industry only.
+            return None
         symbol = normalize_ticker(ticker)
         ak = self._akshare()
         # EastMoney profile first, CNInfo as fallback (EastMoney is the
