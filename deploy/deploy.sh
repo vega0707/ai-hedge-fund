@@ -128,56 +128,91 @@ YAML
 fi
 
 # ============================================================
-# Step 6: LLM 配置（二选一）
+# Step 6: FreeLLMAPI 安装 + LLM 配置
 # ============================================================
 LLM_ENV="$INSTALL_DIR/.env"
-echo ""
-echo "  === LLM 配置 ==="
-echo "  [1] auto(free) - 程小帮网关（需服务器能访问 xiaobang.ctripcorp.com）"
-echo "  [2] 自定义 key - DeepSeek / OpenAI / Anthropic（推荐公网服务器）"
-echo ""
-read -rp "选择 [1/2, 默认 2]: " llm_choice
-llm_choice="${llm_choice:-2}"
 
-if [[ "$llm_choice" == "1" ]]; then
-    cat > "$LLM_ENV" <<'ENV'
-HEDGE_FUND_LLM_MODEL=auto(free)
-OPENAI_API_BASE=http://xiaobang.ctripcorp.com/chengxiaobang/coding-plan/v1
-OPENAI_API_KEY=<从钥匙串获取填入>
-AIHF_DATA_PROVIDER=akshare
-ENV
-    warn "请编辑 $LLM_ENV 填入 OPENAI_API_KEY"
+# ---- 6a: 安装 Docker（如果没有） ----
+if ! command -v docker &>/dev/null; then
+    info "安装 Docker..."
+    curl -fsSL https://get.docker.com | sh
+    systemctl enable docker
+    systemctl start docker
+    ok "Docker 安装完成"
 else
-    echo ""
-    echo "  推荐 DeepSeek（国内直连，0.1 元/百万 token，10 只股票/天 ≈ ¥0.02）"
-    echo ""
-    read -rp "Provider [deepseek/openai/anthropic, 默认 deepseek]: " provider
-    provider="${provider:-deepseek}"
-    read -rp "Model [默认 deepseek-chat]: " model; model="${model:-deepseek-chat}"
-    read -rsp "API Key: " api_key; echo ""
-    read -rp "Base URL [留空用默认]: " base_url; base_url="${base_url:-}"
+    ok "Docker 已安装"
+fi
 
-    cat > "$LLM_ENV" <<ENV
-HEDGE_FUND_LLM_MODEL=$model
+# ---- 6b: 运行 FreeLLMAPI 容器 ----
+if docker ps --format '{{.Names}}' | grep -q '^freellmapi
+
+# ============================================================
+# Step 7: 复制运行脚本到安装目录
+# ============================================================
+DEPLOY_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for script in run_daily.sh push_email.py; do
+    if [[ -f "$DEPLOY_SRC/$script" ]]; then
+        cp "$DEPLOY_SRC/$script" "$SCRIPTS_DIR/"
+        chmod +x "$SCRIPTS_DIR/$script"
+    fi
+done
+ok "运行脚本已复制"
+
+# ============================================================
+# Step 8: Cron 任务
+# ============================================================
+CRON_LINE="30 14 * * 1-5 $SCRIPTS_DIR/run_daily.sh >> $LOG_DIR/cron.log 2>&1"
+if crontab -l 2>/dev/null | grep -q "run_daily.sh"; then
+    warn "Cron 任务已存在，跳过（修改请用 crontab -e）"
+else
+    (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
+    ok "Cron 已配置：周一到周五 14:30 运行"
+    warn "建议改为 15:30（收盘后数据更完整）: crontab -e 改 30 14 → 30 15"
+fi
+
+# ============================================================
+# Done
+# ============================================================
+echo ""
+echo "============================================"
+ok "部署完成！"
+echo "============================================"
+echo ""
+echo "剩余配置:"
+echo "  1. 编辑 $CONFIG_DIR/smtp.yaml 填写邮箱（必须）"
+echo "  2. 手动测试: $SCRIPTS_DIR/run_daily.sh --dry-run"
+echo "  3. 查看日志: tail -f $LOG_DIR/cron.log"
+echo ""
+echo "更新持仓: 编辑 $CONFIG_DIR/tickers.yaml（增删股票，次日生效）"
+echo "调整时间: crontab -e（建议 15:30 收盘后跑）"
+; then
+    ok "FreeLLMAPI 容器已在运行"
+else
+    info "拉取并启动 FreeLLMAPI（聚合 16+ 免费 LLM）..."
+    docker run -d \
+        --name freellmapi \
+        --restart unless-stopped \
+        -p 3001:3001 \
+        -e ENCRYPTION_KEY=$(openssl rand -hex 32) \
+        ghcr.io/tashfeenahmed/freellmapi:latest
+    ok "FreeLLMAPI 已启动 → http://localhost:3001"
+    echo "  Web UI: http://<服务器 IP>:3001"
+    echo "  首次访问请设置管理员密码并配置免费提供商（Google/Groq/Cerebras 等）"
+fi
+
+# ---- 6c: 配置 ai-hedge-fund 使用 FreeLLMAPI ----
+cat > "$LLM_ENV" <<'ENV'
+# FreeLLMAPI（本地聚合免费 LLM）
+HEDGE_FUND_LLM_MODEL=gpt-4o-mini
+OPENAI_API_BASE=http://localhost:3001/v1
+OPENAI_API_KEY=sk-freellmapi
 AIHF_DATA_PROVIDER=akshare
 ENV
-
-    case "$provider" in
-        deepseek)
-            echo "DEEPSEEK_API_KEY=$api_key" >> "$LLM_ENV"
-            [[ -n "$base_url" ]] && echo "DEEPSEEK_API_BASE=$base_url" >> "$LLM_ENV"
-            ;;
-        openai)
-            echo "OPENAI_API_KEY=$api_key" >> "$LLM_ENV"
-            [[ -n "$base_url" ]] && echo "OPENAI_API_BASE=$base_url" >> "$LLM_ENV"
-            ;;
-        anthropic)
-            echo "ANTHROPIC_API_KEY=$api_key" >> "$LLM_ENV"
-            [[ -n "$base_url" ]] && echo "ANTHROPIC_BASE_URL=$base_url" >> "$LLM_ENV"
-            ;;
-    esac
-    ok "LLM 配置已写入 $LLM_ENV"
-fi
+ok "LLM 已配置 → FreeLLMAPI (localhost:3001)"
+echo ""
+echo "  重要：首次使用需访问 http://<服务器 IP>:3001 配置免费提供商"
+echo "  推荐启用: Google Gemini (免费)、Groq (免费)、Cerebras (免费)"
+echo "  配置完成后，ai-hedge-fund 会自动使用这些免费模型"
 
 # ============================================================
 # Step 7: 复制运行脚本到安装目录
