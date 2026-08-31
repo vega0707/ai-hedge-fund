@@ -31,7 +31,7 @@
   },
   {
     "display_name": "Auto (Free) — Chengxiaobang gateway",
-    "model_name": "auto(free)",
+    "model_name": "auto",
     "provider": "OpenAI"
   },
   {
