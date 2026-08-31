@@ -161,6 +161,19 @@ def _map_price(row: dict) -> Price:
     )
 
 
+_HK_COLUMN_ALIASES: dict[str, list[str]] = {
+    "price_to_earnings_ratio": ["市盈率"],
+    "price_to_book_ratio": ["市净率"],
+    "net_margin": ["销售净利率(%)"],
+    "return_on_equity": ["股东权益回报率(%)"],
+    "return_on_assets": ["总资产回报率(%)"],
+    "revenue_growth": ["营业总收入滚动环比增长(%)"],
+    "earnings_per_share": ["基本每股收益(元)"],
+    "book_value_per_share": ["每股净资产(元)"],
+    "free_cash_flow_per_share": ["每股经营现金流(元)"],
+    "market_cap": ["总市值(港元)"],
+}
+
 # Field -> candidate Sina column names, tried in order. Real columns carry
 # unit suffixes ('净资产收益率(%)'); aliases keep older/sparser feeds working.
 _COLUMN_ALIASES: dict[str, list[str]] = {
@@ -486,10 +499,9 @@ class AkshareDataClient:
         period: str = "ttm",
         limit: int = 10,
     ) -> list[FinancialMetrics]:
-        if _hk_code(ticker) is not None:
-            # No free point-in-time HK fundamentals feed — empty is a valid
-            # DataClient "no data" response; persona agents abstain on it.
-            return []
+        hk = _hk_code(ticker)
+        if hk is not None:
+            return self._fetch_hk_financial_metrics(hk, ticker, end_date, limit)
         symbol = normalize_ticker(ticker)
         ak = self._akshare()
         df = self._fetch(ak.stock_financial_analysis_indicator, symbol=symbol)
@@ -499,6 +511,75 @@ class AkshareDataClient:
         # Newest first; only rows provably public by end_date (no look-ahead).
         metrics.sort(key=lambda m: m.filing_date or "", reverse=True)
         return [m for m in metrics if m.filing_date and m.filing_date <= end_date][:limit]
+
+    def _fetch_hk_financial_metrics(
+        self, hk_code: str, ticker: str, end_date: str, limit: int,
+    ) -> list[FinancialMetrics]:
+        """HK stock financial metrics from EastMoney (AkShare).
+
+        Uses ``stock_hk_financial_indicator_em`` which returns the latest
+        snapshot of key ratios (PE, PB, market cap, EPS, ROE, net margin, …)
+        per report period.  Each row = one reporting period, so we get the
+        same shape as the A-share path.
+
+        Gross/operating margin are NOT exposed by this endpoint — those
+        fields stay null.  The persona agents tolerate partial data and
+        will judge on whatever is present.
+        """
+        ak = self._akshare()
+        df = self._fetch(ak.stock_hk_financial_indicator_em, symbol=hk_code)
+        if df.empty:
+            return []
+
+        metrics: list[FinancialMetrics] = []
+        for _, row in df.iterrows():
+            report_period = str(row.get("日期", "")).strip()
+            # EastMoney HK rows carry the report date in a "报告期" column
+            # for the indicator endpoint; fall back to 日期 if absent.
+            if not report_period or report_period == "nan":
+                report_period = str(row.get("报告期", "")).strip()
+            if not report_period:
+                continue
+            # Normalise YYYYMMDD / YYYY-MM-DD → YYYY-MM-DD
+            compact = report_period.replace("-", "").strip()
+            if len(compact) != 8:
+                continue
+            rp = f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+            if rp > end_date:
+                continue
+
+            values = {
+                field: _column_value(row, aliases)
+                for field, aliases in _HK_COLUMN_ALIASES.items()
+            }
+            percent = {
+                f: _to_float(values[f]) / 100.0
+                for f in ("net_margin", "return_on_equity", "return_on_assets",
+                          "revenue_growth")
+                if _to_float(values.get(f)) is not None
+            }
+
+            metrics.append(FinancialMetrics(
+                ticker=ticker,
+                report_period=rp,
+                period="annual",
+                currency="HKD",
+                # Valuation
+                market_cap=_to_float(values.get("market_cap")),
+                price_to_earnings_ratio=_to_float(values.get("price_to_earnings_ratio")),
+                price_to_book_ratio=_to_float(values.get("price_to_book_ratio")),
+                # Profitability
+                net_margin=percent.get("net_margin"),
+                return_on_equity=percent.get("return_on_equity"),
+                return_on_assets=percent.get("return_on_assets"),
+                # Per-share
+                earnings_per_share=_to_float(values.get("earnings_per_share")),
+                book_value_per_share=_to_float(values.get("book_value_per_share")),
+                free_cash_flow_per_share=_to_float(values.get("free_cash_flow_per_share")),
+            ))
+
+        metrics.sort(key=lambda m: m.report_period, reverse=True)
+        return metrics[:limit]
 
     def _fetch_hk_tencent(self, hk_code: str, start: str, end: str) -> list[Price]:
         """HK daily bars from Tencent's public kline JSON endpoint.
