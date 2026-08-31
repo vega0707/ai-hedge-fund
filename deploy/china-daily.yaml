@@ -1,0 +1,19 @@
+# china-daily.yaml · 每日推送用（5 位关键大师，省 LLM 成本 + 时间）
+# 完整 12 位大师分析请用 fund/china.yaml
+name: china-daily
+strategies:
+  - name: 价值五剑
+    weight: 1.0
+    models:
+      - name: graham          # 安全边际
+        weight: 2.0
+      - name: buffett         # 护城河
+      - name: munger          # 逆向
+      - name: dalio           # 机器质量
+      - name: greenblatt      # 魔法公式（纯量化，无 LLM 成本）
+risk:
+  max_position_pct: 0.25
+  max_gross_exposure: 1.0
+capital: 100000
+rebalance: weekly
+benchmark: "000300"
