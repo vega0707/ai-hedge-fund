@@ -515,68 +515,131 @@ class AkshareDataClient:
     def _fetch_hk_financial_metrics(
         self, hk_code: str, ticker: str, end_date: str, limit: int,
     ) -> list[FinancialMetrics]:
-        """HK stock financial metrics from EastMoney (AkShare).
+        """HK stock financial metrics from EastMoney via three financial statements.
 
-        Uses ``stock_hk_financial_indicator_em`` which returns the latest
-        snapshot of key ratios (PE, PB, market cap, EPS, ROE, net margin, …)
-        per report period.  Each row = one reporting period, so we get the
-        same shape as the A-share path.
+        Uses ``stock_financial_hk_report_em`` for 利润表/资产负债表/现金流量表.
+        Data is in long format (one row per line-item per period), so we pivot
+        to wide format keyed by ``REPORT_DATE``.
 
-        Gross/operating margin are NOT exposed by this endpoint — those
-        fields stay null.  The persona agents tolerate partial data and
-        will judge on whatever is present.
+        Gross/operating margin, ROE/ROA, debt ratios are derived from the
+        raw line items. Valuation ratios (PE/PB/market_cap) come from the
+        indicator snapshot (single-row) and are applied to the most recent
+        period only.
         """
         ak = self._akshare()
-        df = self._fetch(ak.stock_hk_financial_indicator_em, symbol=hk_code)
-        if df.empty:
+
+        # --- 1) Three financial statements (long format, annual) ----------
+        stmts: dict[str, list[dict]] = {}  # report_period -> {item: amount}
+        for symbol in ("利润表", "资产负债表", "现金流量表"):
+            try:
+                df = self._fetch(
+                    ak.stock_financial_hk_report_em,
+                    stock=hk_code, symbol=symbol, indicator="年度",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("HK %s report failed for %s: %s", symbol, hk_code, exc)
+                continue
+            if df.empty:
+                continue
+            for _, row in df.iterrows():
+                raw_date = str(row.get("REPORT_DATE", "")).strip()
+                if not raw_date:
+                    continue
+                # "2025-12-31 00:00:00" -> "2025-12-31"
+                rp = raw_date[:10]
+                if rp not in stmts:
+                    stmts[rp] = {}
+                name = str(row.get("STD_ITEM_NAME", "")).strip()
+                amt = _to_float(row.get("AMOUNT"))
+                if name and amt is not None:
+                    stmts[rp][name] = amt
+
+        if not stmts:
             return []
 
+        # --- 2) Latest valuation snapshot (indicator endpoint) ------------
+        valuation: dict[str, float] = {}
+        ind_df = None
+        try:
+            ind_df = self._fetch(
+                ak.stock_hk_financial_indicator_em, symbol=hk_code,
+            )
+            if not ind_df.empty:
+                ind = ind_df.iloc[0]
+                valuation = {
+                    "pe": _to_float(ind.get("市盈率")),
+                    "pb": _to_float(ind.get("市净率")),
+                    "market_cap": _to_float(ind.get("总市值(港元)")),
+                    "roe_pct": _to_float(ind.get("股东权益回报率(%)")),
+                    "roa_pct": _to_float(ind.get("总资产回报率(%)")),
+                    "net_margin_pct": _to_float(ind.get("销售净利率(%)")),
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("HK indicator snapshot failed for %s: %s", hk_code, exc)
+
+        # --- 3) Pivot to FinancialMetrics ---------------------------------
         metrics: list[FinancialMetrics] = []
-        for _, row in df.iterrows():
-            report_period = str(row.get("日期", "")).strip()
-            # EastMoney HK rows carry the report date in a "报告期" column
-            # for the indicator endpoint; fall back to 日期 if absent.
-            if not report_period or report_period == "nan":
-                report_period = str(row.get("报告期", "")).strip()
-            if not report_period:
-                continue
-            # Normalise YYYYMMDD / YYYY-MM-DD → YYYY-MM-DD
-            compact = report_period.replace("-", "").strip()
-            if len(compact) != 8:
-                continue
-            rp = f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+        sorted_periods = sorted(stmts.keys(), reverse=True)
+        for rp in sorted_periods:
             if rp > end_date:
                 continue
+            items = stmts[rp]
 
-            values = {
-                field: _column_value(row, aliases)
-                for field, aliases in _HK_COLUMN_ALIASES.items()
-            }
-            percent = {
-                f: _to_float(values[f]) / 100.0
-                for f in ("net_margin", "return_on_equity", "return_on_assets",
-                          "revenue_growth")
-                if _to_float(values.get(f)) is not None
-            }
+            # Income statement
+            revenue = items.get("营业额") or items.get("营业收入")
+            gross_profit = items.get("毛利")
+            operating_profit = items.get("经营溢利") or items.get("营业利润")
+            net_profit = items.get("股东应占溢利") or items.get("净利润")
+            eps = items.get("每股基本盈利")
 
-            metrics.append(FinancialMetrics(
+            # Balance sheet
+            total_equity = items.get("股东权益") or items.get("所有者权益") or items.get("股东权益合计")
+            total_assets = items.get("资产总计") or items.get("总资产")
+            total_liabilities = items.get("负债合计") or items.get("总负债")
+            current_assets = items.get("流动资产") or items.get("流动资产合计")
+            current_liabilities = items.get("流动负债") or items.get("流动负债合计")
+
+            # Cash flow
+            operating_cf = items.get("经营活动产生的现金流量净额") or items.get("经营活动现金流量净额")
+
+            # Derived ratios
+            gross_margin = gross_profit / revenue if revenue and gross_profit else None
+            operating_margin = operating_profit / revenue if revenue and operating_profit else None
+            net_margin = net_profit / revenue if revenue and net_profit else None
+            roe = net_profit / total_equity if total_equity and net_profit else None
+            roa = net_profit / total_assets if total_assets and net_profit else None
+            current_ratio = current_assets / current_liabilities if current_liabilities and current_assets else None
+            debt_to_equity = total_liabilities / total_equity if total_equity and total_liabilities else None
+
+            # Per-share: operating CF / shares outstanding
+            shares = None
+            if ind_df is not None and not ind_df.empty:
+                shares = _to_float(ind_df.iloc[0].get("已发行股本(股)"))
+            fcf_per_share = operating_cf / shares if shares and operating_cf else None
+
+            m = FinancialMetrics(
                 ticker=ticker,
                 report_period=rp,
                 period="annual",
                 currency="HKD",
-                # Valuation
-                market_cap=_to_float(values.get("market_cap")),
-                price_to_earnings_ratio=_to_float(values.get("price_to_earnings_ratio")),
-                price_to_book_ratio=_to_float(values.get("price_to_book_ratio")),
+                # Valuation (only meaningful for most recent period)
+                price_to_earnings_ratio=valuation.get("pe") if rp == sorted_periods[0] else None,
+                price_to_book_ratio=valuation.get("pb") if rp == sorted_periods[0] else None,
+                market_cap=valuation.get("market_cap") if rp == sorted_periods[0] else None,
                 # Profitability
-                net_margin=percent.get("net_margin"),
-                return_on_equity=percent.get("return_on_equity"),
-                return_on_assets=percent.get("return_on_assets"),
+                gross_margin=gross_margin,
+                operating_margin=operating_margin,
+                net_margin=net_margin,
+                return_on_equity=roe if roe is not None else (valuation.get("roe_pct", 0) / 100 if valuation.get("roe_pct") else None),
+                return_on_assets=roa if roa is not None else (valuation.get("roa_pct", 0) / 100 if valuation.get("roa_pct") else None),
+                # Liquidity / Leverage
+                current_ratio=current_ratio,
+                debt_to_equity=debt_to_equity,
                 # Per-share
-                earnings_per_share=_to_float(values.get("earnings_per_share")),
-                book_value_per_share=_to_float(values.get("book_value_per_share")),
-                free_cash_flow_per_share=_to_float(values.get("free_cash_flow_per_share")),
-            ))
+                earnings_per_share=eps,
+                free_cash_flow_per_share=fcf_per_share,
+            )
+            metrics.append(m)
 
         metrics.sort(key=lambda m: m.report_period, reverse=True)
         return metrics[:limit]
