@@ -36,4 +36,4 @@ risk:
   max_gross_exposure: 1.0     # 无杠杆
 capital: 100000
 rebalance: weekly             # 每周调仓
-benchmark: "000300"             # 沪深300 指数（A 股基准，回测交易日网格）
+benchmark: "600519"  # 茅台 (沪深300被墙，用大盘蓝筹股替代)             # 沪深300 指数（A 股基准，回测交易日网格）

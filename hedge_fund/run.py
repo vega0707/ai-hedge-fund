@@ -112,7 +112,7 @@ def main() -> None:
         start = args.start or (
             _date.fromisoformat(args.date) - timedelta(weeks=_BACKTEST_WEEKS)
         ).isoformat()
-        with FDClient() as raw:
+        with make_data_client() as raw:
             fd = CachedDataClient(raw)
             with console.status(
                 f"[cyan]{spec.name}: backtesting {start} → {args.date} "
