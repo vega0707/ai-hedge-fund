@@ -121,6 +121,22 @@ def _hk_code(ticker: str) -> str | None:
     return None
 
 
+def _index_sina_symbol(code: str) -> str | None:
+    """Convert A-share index code to Sina index symbol (sh/sz prefix).
+    
+    Shanghai indices: 000xxx, 950xxx → sh000300
+    Shenzhen indices: 399xxx → sz399001
+    Returns None if not recognized as an index code.
+    """
+    if len(code) != 6 or not code.isdigit():
+        return None
+    if code.startswith(('0', '9')):
+        return f'sh{code}'
+    if code.startswith('3'):
+        return f'sz{code}'
+    return None
+
+
 def _prefixed_symbol(ticker: str) -> str:
     """A-share 6-digit code -> Sina/Tencent symbol ('sh600519', 'sz000001')."""
     code = normalize_ticker(ticker)
@@ -415,14 +431,14 @@ class AkshareDataClient:
                     start_date=start, end_date=end, adjust="qfq",
                 ),
                 lambda: self._fetch_hk_tencent(hk, start, end),
+                lambda: self._fetch_baostock_prices(hk, start, end, market="hk"),
             ]
         else:
             symbol = normalize_ticker(ticker)
             # EastMoney (qfq) first, then Sina (qfq), then Tencent (raw) —
             # free scraping sources are flaky and sometimes blocked per-domain.
-            # The index feed is the last resort: benchmark codes (e.g. 000300)
-            # are not stock feeds, and only matter when the stock sources fail
-            # or come back empty.
+            # For index codes (000300, 399001), add Sina index feed before
+            # EastMoney index (which is often blocked).
             sources = [
                 lambda: self._fetch(
                     ak.stock_zh_a_hist, symbol=symbol, period="daily",
@@ -436,11 +452,23 @@ class AkshareDataClient:
                     ak.stock_zh_a_hist_tx, symbol=_prefixed_symbol(symbol),
                     start_date=start, end_date=end,
                 ),
-                lambda: self._fetch(
-                    ak.index_zh_a_hist, symbol=symbol, period="daily",
-                    start_date=start, end_date=end,
-                ),
+                lambda: self._fetch_baostock_prices(symbol, start, end),
             ]
+            # Add index sources if ticker is an index code
+            sina_idx = _index_sina_symbol(symbol)
+            if sina_idx:
+                sources.append(
+                    lambda: self._fetch(
+                        ak.stock_zh_index_daily, symbol=sina_idx,
+                        start_date=start, end_date=end,
+                    )
+                )
+                sources.append(
+                    lambda: self._fetch(
+                        ak.index_zh_a_hist, symbol=symbol, period="daily",
+                        start_date=start, end_date=end,
+                    )
+                )
         result = self._try_sources(sources)
         if isinstance(result, list) and result and isinstance(result[0], Price):
             prices = result  # already mapped (Tencent HK path)
@@ -484,6 +512,62 @@ class AkshareDataClient:
         resp = requests.get(_HK_TENCENT_URL, params=params, timeout=30)
         resp.raise_for_status()
         return _map_hk_tencent_prices(resp.json(), symbol)
+
+    def _baostock_prices_symbol(self, code: str, market: str = "a") -> str:
+        """Code -> baostock symbol for price queries.
+
+        A-share: ``600519`` -> ``sh.600519``; HK: ``01810`` -> ``hk.01810``.
+        """
+        if market == "hk":
+            return f"hk.{code}"
+        return _baostock_symbol(code)
+
+    def _fetch_baostock_prices(
+        self, code: str, start: str, end: str, market: str = "a",
+    ) -> list[Price]:
+        """Daily OHLCV from baostock — used as the last-resort price source.
+
+        baostock covers A-shares (``sh.``/``sz.``) and HK (``hk.``) with the
+        same ``query_history_k_data_plus`` call. A login/logout cycle is
+        cheap (~0.3s) and we already know it works when AkShare's scraper
+        endpoints are blocked.
+        """
+        # start/end arrive as YYYYMMDD from get_prices; baostock wants YYYY-MM-DD.
+        s = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
+        e = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+        symbol = self._baostock_prices_symbol(code, market)
+        try:
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code != "0":
+                raise RuntimeError(f"baostock login failed: {lg.error_msg}")
+            try:
+                rs = bs.query_history_k_data_plus(
+                    symbol, "date,open,high,low,close,volume",
+                    start_date=s, end_date=e,
+                    frequency="d", adjustflag="2",  # 前复权
+                )
+                if rs.error_code != "0":
+                    raise RuntimeError(f"baostock query failed: {rs.error_msg}")
+                rows = []
+                while rs.next():
+                    d = rs.get_row_data()
+                    # d = [date, open, high, low, close, volume]
+                    if d and d[0] and all(v != "" for v in d[1:5]):
+                        rows.append(Price(
+                            open=_to_float(d[1]),
+                            high=_to_float(d[2]),
+                            low=_to_float(d[3]),
+                            close=_to_float(d[4]),
+                            volume=int(float(d[5] or 0)),
+                            time=d[0],
+                        ))
+            finally:
+                bs.logout()
+        except Exception as exc:
+            logger.warning("baostock prices unavailable for %s: %s", symbol, exc)
+            raise
+        return rows
 
     def _fetch_baostock_valuation(
         self,
