@@ -94,9 +94,7 @@ def main() -> None:
     # 这类票直接判定为"盈利异常"，不给数字，提示看基本面/大师方向。
     if cur_pe > 100:
         print(f"📊 {name} {code}\n现价 {mark}\n"
-              f"⚠ 当前 PE {cur_pe:.0f}（盈利几乎为零/崩塌）\n"
-              f"历史 PE 估值法不适用（PE 失真）。建议看大师方向信号："
-              f"若大师集体看空则反弹减仓，勿因\"便宜\"接刀\n")
+              f"⚠ 当前 PE {cur_pe:.0f}（盈利几乎为零/崩塌），历史 PE 估值不适用\n")
         return
 
     p25, p50, p75 = (pctile(hist["pe"], q) for q in (25, 50, 75))
@@ -105,54 +103,34 @@ def main() -> None:
     # gap = 现价相对合理中值的偏离：正 = 现价高于合理中值（偏贵）
     gap = (mark / mid - 1) * 100 if mark and mid else 0.0
 
-    # 现价相对合理区间的定位
-    if mark < lo:
-        zone = f"低估（低于合理区间下沿 {lo:.2f}）"
-    elif mark > hi:
-        zone = f"高估（高于合理区间上沿 {hi:.2f}）"
-    else:
-        zone = f"合理区间内（{lo:.2f} ~ {hi:.2f}）"
-
     lines = [
         f"📊 {name} {code}",
         f"现价 {mark}",
-        "",
-        f"合理价区间：{lo:.2f} ~ {hi:.2f}（中值 {mid:.2f}，3年PE P25~P75 法）",
-        f"现价 vs 合理中值：{gap:+.1f}%　→　{zone}",
-        f"当前PE {cur_pe:.1f}　历史3年PE：P25={p25:.1f} 中位={p50:.1f} P75={p75:.1f}",
+        f"合理价 {lo:.1f}~{hi:.1f}（中值{mid:.1f}）",
     ]
 
-    # 操作建议：现价 vs 合理中值 + 持仓盈亏
+    # 操作建议：现价 vs 合理中值 + 持仓盈亏（短句，同 demo）
     if not shares or shares <= 0:
         if gap < -15:
-            lines.append(f"操作：未持仓 · 现价比合理中值低 {abs(gap):.0f}%，可关注低吸")
+            lines.append("操作：可关注，回踩分批建仓")
         elif gap > 15:
-            lines.append(f"操作：未持仓 · 现价偏贵（高 {gap:.0f}%），不追")
+            lines.append("操作：不追，等右侧信号")
         else:
-            lines.append("操作：未持仓 · 估值接近合理，观望或小仓")
+            lines.append("操作：观望")
     else:
         pnl_pct = (mark / cost - 1) * 100
         pnl = (mark - cost) * shares
-        lines.append(f"持仓 {int(shares)}股 @ {cost:.2f} → 浮动 {pnl:+,.0f}（{pnl_pct:+.1f}%）")
+        lines.append(f"持仓 {int(shares)}股 浮动 {pnl:+,.0f}（{pnl_pct:+.1f}%）")
         # 决策：便宜+持仓 + 贵+持仓
-        if gap < -15 and pnl_pct < 0:
-            lines.append(f"操作：浮亏{pnl_pct:.0f}% 且现价低于合理中值{abs(gap):.0f}% → "
-                         f"估值已低，可持有等修复，勿在此割肉")
-        elif gap < -15:
-            lines.append(f"操作：浮盈{pnl_pct:.0f}% 且现价低于合理中值 → 继续持有，"
-                         f"仍有上行空间")
-        elif gap > 15 and pnl_pct > 10:
-            lines.append(f"操作：浮盈{pnl_pct:.0f}% 但现价已高于合理中值{gap:.0f}% → "
-                         f"建议减仓止盈，落袋为主")
+        if gap < -15:
+            lines.append("操作：持有，仍低于合理价有空间" if pnl_pct >= 0
+                         else "操作：持有/补仓，估值已低")
         elif gap > 15:
-            lines.append(f"操作：现价高估（{gap:.0f}%）→ 反弹减仓，不宜加仓")
-        elif pnl_pct > 10:
-            lines.append(f"操作：估值合理但已浮盈{pnl_pct:.0f}% → 持有，上移止盈位")
+            lines.append("操作：减仓止盈" if pnl_pct > 10
+                         else "操作：反弹减仓")
         else:
-            lines.append("操作：估值合理区间 → 持有观察，不加不减")
+            lines.append("操作：持有" if pnl_pct > 10 else "操作：持有观察")
 
-    lines.append("")
-    lines.append("注：合理价=现价×3年历史PE分位/当前PE，估值中枢会随业绩与市场整体漂移")
     print("\n".join(lines))
 
 
