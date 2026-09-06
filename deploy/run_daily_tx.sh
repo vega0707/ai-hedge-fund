@@ -40,18 +40,20 @@ fi
 
 [[ -f "$TICKERS_FILE" ]] || { echo "[ERR] tickers.yaml 不存在: $TICKERS_FILE" >&2; exit 1; }
 
-# ---- 构建 ticker 列表（code + 中文名） ----
-declare -a CODES NAMES
-while IFS='|' read -r code name; do
+# ---- 构建 ticker 列表（code + 中文名 + 持仓/成本） ----
+declare -a CODES NAMES SHARES COSTS
+while IFS='|' read -r code name shares cost; do
     [[ -z "$code" ]] && continue
     CODES+=("$code")
     NAMES+=("$name")
+    SHARES+=("${shares:-0}")
+    COSTS+=("${cost:-}")
 done < <(python3 -c "
 import yaml
 with open('$TICKERS_FILE') as f:
     data = yaml.safe_load(f)
 for t in data.get('tickers', []):
-    print(f\"{t['code']}|{t.get('name','')}\")
+    print(f\"{t['code']}|{t.get('name','')}|{t.get('shares',0)}|{t.get('cost','')}\")
 ")
 
 if [[ ${#CODES[@]} -eq 0 ]]; then
@@ -88,27 +90,10 @@ for i in "${!CODES[@]}"; do
         2>&1 | grep -viE "it/s\]|^\s*$" >> "$LOG_DIR/run-${DATE}.log" || true
     echo "[$DATE] $code 分析完成"
 
-    # 组装可读摘要
-    SUMMARY=$(python3 -c "
-import json
-from pathlib import Path
-p = Path('$JSON_OUT')
-if not p.exists():
-    print('分析结果不存在'); raise SystemExit
-data = json.loads(p.read_text())
-lines = [f\"代码 $code ｜ $name · \${data.get('marks', {}).get('$code', '?')}\"]
-for strat in data.get('strategies', []):
-    w = strat.get('weights', {}).get('$code', 0)
-    arrow = '🟢 建议' if w > 0 else ('🔴 回避' if w < 0 else '⚪ 中性')
-    lines.append(f\"  \${arrow} \${strat.get('name','?')}\")
-    for sig in strat.get('signals', []):
-        if sig.get('ticker') != '$code': continue
-        v = sig.get('value', 0)
-        e = '🟢' if v > 0.3 else ('🔴' if v < -0.3 else '⚪')
-        r = (sig.get('reasoning') or '').replace(chr(10),' ')[:90]
-        lines.append(f\"    \${e} \${sig.get('model_name','?')} \${v:+.2f} \${r}\")
-print(chr(10).join(lines))
-" 2>/dev/null) || SUMMARY="($code) 摘要生成失败"
+    # 组装可读摘要（summarize.py 输出结构化文本）
+    SUMMARY=$(python3 "$BASE_DIR/scripts/summarize.py" \
+        "$JSON_OUT" "$code" "$name" "${SHARES[$i]:-}" "${COSTS[$i]:-}" \
+        2>/dev/null) || SUMMARY="($code) 摘要生成失败"
 
     notify_weixin "📊 $code $name · $DATE" "$SUMMARY"
 
