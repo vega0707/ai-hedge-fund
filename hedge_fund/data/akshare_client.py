@@ -137,10 +137,22 @@ def _index_sina_symbol(code: str) -> str | None:
     return None
 
 
+def _exchange_prefix(code: str) -> str:
+    """6-digit A-share code -> exchange prefix for Sina/Tencent/baostock.
+
+    sh: 60x/68x (主板/科创板), 900/920 (B股), 5xx (沪基金/ETF)
+    sz: 00x/30x (主板/创业板), 200 (B股), 1xx (深基金/ETF)
+    Falls back to sz for unknown ranges rather than raising.
+    """
+    if code.startswith(("5", "6", "9")):
+        return "sh"
+    return "sz"
+
+
 def _prefixed_symbol(ticker: str) -> str:
     """A-share 6-digit code -> Sina/Tencent symbol ('sh600519', 'sz000001')."""
     code = normalize_ticker(ticker)
-    return ("sh" if code.startswith(("6", "9")) else "sz") + code
+    return _exchange_prefix(code) + code
 
 
 def _map_price(row: dict) -> Price:
@@ -326,7 +338,7 @@ def _map_hk_tencent_prices(payload: dict, code: str) -> list[Price]:
 def _baostock_symbol(ticker: str) -> str:
     """A-share 6-digit code -> baostock symbol ('sh.600519', 'sz.300679')."""
     code = normalize_ticker(ticker)
-    return ("sh" if code.startswith(("6", "9")) else "sz") + "." + code
+    return _exchange_prefix(code) + "." + code
 
 
 def _match_valuation(
