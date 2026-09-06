@@ -90,6 +90,15 @@ def main() -> None:
         print(f"📊 {name} {code}\n无法取现价，跳过")
         return
 
+    # 盈利崩塌保护：PE 畸高（EPS 近零）时历史 PE 分位法会给出荒谬"合理价"，
+    # 这类票直接判定为"盈利异常"，不给数字，提示看基本面/大师方向。
+    if cur_pe > 100:
+        print(f"📊 {name} {code}\n现价 {mark}\n"
+              f"⚠ 当前 PE {cur_pe:.0f}（盈利几乎为零/崩塌）\n"
+              f"历史 PE 估值法不适用（PE 失真）。建议看大师方向信号："
+              f"若大师集体看空则反弹减仓，勿因\"便宜\"接刀\n")
+        return
+
     p25, p50, p75 = (pctile(hist["pe"], q) for q in (25, 50, 75))
     lo, mid, hi = (mark * p25 / cur_pe, mark * p50 / cur_pe,
                    mark * p75 / cur_pe)
