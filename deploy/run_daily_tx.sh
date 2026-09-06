@@ -14,7 +14,7 @@ BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$BASE_DIR/config"
 LOG_DIR="$BASE_DIR/logs"
 TICKERS_FILE="$CONFIG_DIR/tickers.yaml"
-MANDATE="$BASE_DIR/fund/china.yaml"
+MANDATE="$BASE_DIR/hedge_fund/fund/china.yaml"
 VENV="$BASE_DIR/.venv"
 DATE=$(date +%Y-%m-%d)
 
