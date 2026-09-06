@@ -68,7 +68,8 @@ if $DRY_RUN; then
     exit 0
 fi
 
-# ---- 按行数拆成 ≤2 条推送 ----
+# ---- 按行数拆成 ≤2 条推送；每条用 markdown 代码块包裹（微信 iLink
+#      只有代码块内才按行渲染换行，普通文本的 \n 会被压成一行）----
 TOTAL_LINES=$(wc -l < "$LOG_DIR/val-${DATE}.txt")
 CHUNK=$(( (TOTAL_LINES + 1) / 2 ))
 
@@ -76,7 +77,8 @@ split -l "$CHUNK" -d -a 1 "$LOG_DIR/val-${DATE}.txt" "$LOG_DIR/val-chunk-"
 for f in "$LOG_DIR"/val-chunk-?; do
     [[ -e "$f" ]] || continue
     echo "[$DATE] 推送一条 ($(wc -l < "$f") 行)..."
-    cat "$f" | ssh "${SSH_OPTS[@]}" "$NOTIFY_HOST" \
+    # 包成 fenced code block
+    { echo '```'; cat "$f"; echo '```'; } | ssh "${SSH_OPTS[@]}" "$NOTIFY_HOST" \
         "export PATH=\"\$HOME/.local/bin:\$PATH\"; cat | $HERMES_BIN send --to '$NOTIFY_WEIXIN' --subject '📊 持仓估值 $DATE'" \
         >> "$LOG_DIR/hermes.log" 2>&1 || echo "[WARN] 推送失败" >&2
     sleep 35
